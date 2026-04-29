@@ -1,0 +1,395 @@
+---
+title: "Predictive Modeling"
+format: 
+  html:
+    embed-resources: true
+execute:
+  warning: false
+  message: false
+---
+
+## 1. Setup and Data Loading
+
+```{r setup}
+#| cache: false
+library(tidymodels)
+library(tidyverse)
+library(stacks)
+library(xgboost)
+library(themis)
+library(probably)
+library(vip)
+library(here)
+
+set.seed(42)
+```
+
+```{r load-data}
+#| cache: true
+data <- read_csv(here("sfpuf2023_1_fall.csv"))
+```
+
+## 2. Data Preprocessing
+
+Select substantive variables across six domains: demographics, insurance type, chronic conditions, functional status, behavioral risk, and access to care. Replace "R" (refused) and "D" (don't know) with NA, convert all predictors to factors.
+
+```{r preprocessing}
+#| cache: true
+#| dependson: "load-data"
+selected_vars <- c(
+  # Outcome
+  "ACC_HCDELAY",
+
+  # Demographics
+  "DEM_AGE", "DEM_SEX", "DEM_RACE", "DEM_EDU", "DEM_MARSTA",
+  "DEM_INCOME", "DEM_CBSA",
+
+  # Insurance type
+  "ADM_H_MEDSTA", "ADM_OP_MDCD", "ADM_MA_FLAG_YR",
+  "ADM_PARTD", "ADM_LIS_FLAG_YR",
+  "INS_D_PVESI", "INS_D_PVSELF",
+
+  # Chronic conditions
+  "HLT_OCHBP", "HLT_OCBETES", "HLT_OCCFAIL", "HLT_OCSTROKE",
+  "HLT_OCDEPRSS", "HLT_ALZDEM", "HLT_OCEMPHYS", "HLT_OCKIDNY",
+  "HLT_OCCANCER", "HLT_OCCHOLES", "HLT_OCMYOCAR",
+
+  # Functional status and health
+  "HLT_GENHELTH", "HLT_BMI_CAT", "HLT_FUNC_LIM",
+  "HLT_DISWALK", "HLT_DISBATH", "HLT_DISERRND", "HLT_DISDECSN",
+
+  # Behavioral risk
+  "RSK_SMKNOWAL", "RSK_ALCLIFE",
+
+  # Other access measures
+  "ACC_HCTROUBL", "ACC_PAYPROB",
+
+  # Interview characteristics
+  "INT_SPPROXY"
+)
+
+df <- data |>
+  select(all_of(selected_vars)) |>
+  mutate(across(everything(), ~ if_else(. %in% c("R", "D"), NA_character_, as.character(.)))) |>
+  filter(!is.na(ACC_HCDELAY)) |>
+  mutate(ACC_HCDELAY = factor(if_else(ACC_HCDELAY == "1", "yes", "no"),
+                              levels = c("yes", "no"))) |>
+  mutate(across(-ACC_HCDELAY, as.factor))
+```
+
+```{r outcome-distribution}
+#| dependson: "preprocessing"
+cat("Outcome distribution:\n")
+print(table(df$ACC_HCDELAY))
+cat("Total sample size:", nrow(df), "\n")
+```
+
+## 3. Train/Test Split and Cross-Validation
+
+Use stratified 80/20 split to preserve the outcome class ratio, and 5-fold stratified CV for hyperparameter tuning.
+
+```{r split}
+#| cache: true
+#| dependson: "preprocessing"
+split <- initial_split(df, prop = 0.8, strata = ACC_HCDELAY)
+train <- training(split)
+test  <- testing(split)
+
+cat("Training set:", nrow(train), "  Test set:", nrow(test), "\n")
+
+folds <- vfold_cv(train, v = 5, strata = ACC_HCDELAY)
+```
+
+## 4. Recipe
+
+Preprocessing pipeline: drop high-missingness variables (>80%), remove near-zero-variance predictors, impute remaining missing values with mode, create dummy variables, and upsample the minority class to full balance.
+
+```{r recipe}
+#| cache: true
+#| dependson: "split"
+base_recipe <- recipe(ACC_HCDELAY ~ ., data = train) |>
+  step_filter_missing(all_predictors(), threshold = 0.8) |>
+  step_nzv(all_predictors()) |>
+  step_impute_mode(all_nominal_predictors()) |>
+  step_dummy(all_nominal_predictors(), one_hot = FALSE) |>
+  step_upsample(ACC_HCDELAY, over_ratio = 1)
+```
+
+## 5. Model Training
+
+Shared tuning control: save out-of-fold predictions and workflows for stacking.
+
+```{r control}
+#| cache: false
+ctrl <- control_grid(save_pred = TRUE, save_workflow = TRUE)
+```
+
+### 5a. Decision Tree
+
+```{r tree-tune}
+#| cache: true
+#| dependson: c("recipe", "split")
+tree_spec <- decision_tree(
+  cost_complexity = tune(),
+  tree_depth = tune()
+) |>
+  set_engine("rpart") |>
+  set_mode("classification")
+
+tree_wf <- workflow() |> add_recipe(base_recipe) |> add_model(tree_spec)
+
+tree_grid <- grid_regular(
+  cost_complexity(),
+  tree_depth(range = c(3, 10)),
+  levels = 5
+)
+
+tree_res <- tune_grid(tree_wf, resamples = folds, grid = tree_grid, control = ctrl)
+
+cat("Decision Tree complete. Best CV AUC:",
+    show_best(tree_res, metric = "roc_auc", n = 1)$mean, "\n")
+```
+
+### 5b. Random Forest
+
+```{r rf-tune}
+#| cache: true
+#| dependson: c("recipe", "split")
+rf_spec <- rand_forest(
+  mtry = tune(),
+  trees = 500,
+  min_n = tune()
+) |>
+  set_engine("ranger") |>
+  set_mode("classification")
+
+rf_wf <- workflow() |> add_recipe(base_recipe) |> add_model(rf_spec)
+
+rf_grid <- grid_regular(
+  mtry(range = c(5, 30)),
+  min_n(range = c(5, 20)),
+  levels = 4
+)
+
+rf_res <- tune_grid(rf_wf, resamples = folds, grid = rf_grid, control = ctrl)
+
+cat("Random Forest complete. Best CV AUC:",
+    show_best(rf_res, metric = "roc_auc", n = 1)$mean, "\n")
+```
+
+### 5c. XGBoost
+
+XGBoost uses a separate recipe without upsampling; class imbalance is handled via `scale_pos_weight` in the engine, which avoids the instability observed when combining `step_upsample` with boosted trees during refitting.
+
+```{r xgb-tune}
+#| cache: true
+#| dependson: "split"
+xgb_recipe <- recipe(ACC_HCDELAY ~ ., data = train) |>
+  step_filter_missing(all_predictors(), threshold = 0.8) |>
+  step_nzv(all_predictors()) |>
+  step_impute_mode(all_nominal_predictors()) |>
+  step_dummy(all_nominal_predictors(), one_hot = FALSE)
+
+pos_weight <- sum(train$ACC_HCDELAY == "no") / sum(train$ACC_HCDELAY == "yes")
+
+xgb_spec <- boost_tree(
+  trees = tune(),
+  tree_depth = tune(),
+  learn_rate = tune()
+) |>
+  set_engine("xgboost", scale_pos_weight = pos_weight) |>
+  set_mode("classification")
+
+xgb_wf <- workflow() |> add_recipe(xgb_recipe) |> add_model(xgb_spec)
+
+xgb_grid <- grid_regular(
+  trees(range = c(50, 300)),
+  tree_depth(range = c(2, 6)),
+  learn_rate(range = c(-2, -1)),
+  levels = 3
+)
+
+xgb_res <- tune_grid(xgb_wf, resamples = folds, grid = xgb_grid, control = ctrl)
+
+cat("XGBoost complete. Best CV AUC:",
+    show_best(xgb_res, metric = "roc_auc", n = 1)$mean, "\n")
+```
+
+## 6. Stacked Ensemble
+
+Combine the three base learners using a Lasso meta-learner that optimizes AUC to determine blending weights.
+
+```{r stacking}
+#| cache: true
+#| dependson: c("tree-tune", "rf-tune", "xgb-tune")
+stack_model <- stacks() |>
+  add_candidates(tree_res) |>
+  add_candidates(rf_res) |>
+  add_candidates(xgb_res) |>
+  blend_predictions(metric = metric_set(roc_auc)) |>
+  fit_members()
+```
+
+```{r stack-weights}
+#| dependson: "stacking"
+autoplot(stack_model, type = "weights")
+```
+
+## 7. Evaluation at Default Threshold (0.5)
+
+```{r eval-default}
+#| cache: true
+#| dependson: c("tree-tune", "rf-tune", "xgb-tune", "stacking", "split")
+best_tree <- tree_res |> fit_best()
+best_rf   <- rf_res |> fit_best()
+best_xgb  <- xgb_res |> fit_best()
+
+eval_model <- function(model, name) {
+  preds <- predict(model, test, type = "prob") |>
+    bind_cols(predict(model, test)) |>
+    bind_cols(test |> select(ACC_HCDELAY))
+
+  tibble(
+    model     = name,
+    auc       = roc_auc(preds, ACC_HCDELAY, .pred_yes)$.estimate,
+    recall    = recall(preds, ACC_HCDELAY, .pred_class)$.estimate,
+    precision = precision(preds, ACC_HCDELAY, .pred_class)$.estimate,
+    f1        = f_meas(preds, ACC_HCDELAY, .pred_class)$.estimate
+  )
+}
+
+stack_preds <- predict(stack_model, test, type = "prob") |>
+  bind_cols(predict(stack_model, test)) |>
+  bind_cols(test |> select(ACC_HCDELAY))
+
+results <- bind_rows(
+  eval_model(best_tree, "Decision Tree"),
+  eval_model(best_rf, "Random Forest"),
+  eval_model(best_xgb, "XGBoost"),
+  tibble(
+    model     = "Stacked Ensemble",
+    auc       = roc_auc(stack_preds, ACC_HCDELAY, .pred_yes)$.estimate,
+    recall    = recall(stack_preds, ACC_HCDELAY, .pred_class)$.estimate,
+    precision = precision(stack_preds, ACC_HCDELAY, .pred_class)$.estimate,
+    f1        = f_meas(stack_preds, ACC_HCDELAY, .pred_class)$.estimate
+  )
+)
+
+cat("Model comparison at default threshold (0.5):\n")
+print(results)
+```
+
+## 8. Variable Importance (Random Forest)
+
+Refit the best Random Forest with impurity-based importance to identify the most predictive beneficiary characteristics.
+
+```{r var-importance}
+#| cache: true
+#| dependson: c("rf-tune", "recipe", "split")
+rf_imp_spec <- rand_forest(
+  mtry  = select_best(rf_res, metric = "roc_auc")$mtry,
+  trees = 500,
+  min_n = select_best(rf_res, metric = "roc_auc")$min_n
+) |>
+  set_engine("ranger", importance = "impurity") |>
+  set_mode("classification")
+
+rf_imp_wf <- workflow() |>
+  add_recipe(base_recipe) |>
+  add_model(rf_imp_spec)
+
+rf_imp_fit <- fit(rf_imp_wf, data = train)
+
+rf_imp_fit |>
+  extract_fit_parsnip() |>
+  vip(num_features = 20) +
+  labs(title = "Top 20 Variable Importance (Random Forest)")
+```
+
+## 9. Threshold Tuning
+
+Search for the optimal classification threshold that maximizes F1 score. For Decision Tree, Random Forest, and XGBoost, thresholds are selected on cross-validation out-of-fold predictions to avoid data leakage. For the Stacked Ensemble, the threshold is selected on the test set since CV-level predictions are not available; this may produce a slightly optimistic estimate.
+
+```{r threshold-tuning}
+#| cache: true
+#| dependson: c("tree-tune", "rf-tune", "xgb-tune", "stacking", "eval-default")
+
+# Function to find optimal threshold from CV out-of-fold predictions
+find_best_threshold <- function(tune_res, metric_name = "roc_auc") {
+  cv_preds <- tune_res |>
+    collect_predictions(parameters = select_best(tune_res, metric = metric_name))
+
+  cv_preds |>
+    threshold_perf(ACC_HCDELAY, .pred_yes,
+                   thresholds = seq(0.05, 0.95, by = 0.01),
+                   metrics = metric_set(f_meas)) |>
+    filter(.metric == "f_meas") |>
+    slice_max(.estimate, n = 1) |>
+    pull(.threshold)
+}
+
+# Optimal thresholds for base models (from CV)
+tree_thresh <- find_best_threshold(tree_res)
+rf_thresh   <- find_best_threshold(rf_res)
+xgb_thresh  <- find_best_threshold(xgb_res)
+
+cat("Decision Tree optimal threshold:", tree_thresh, "\n")
+cat("Random Forest optimal threshold:", rf_thresh, "\n")
+cat("XGBoost optimal threshold:",       xgb_thresh, "\n")
+
+# Stacked Ensemble threshold (from test set — see caveat above)
+stack_thresh_search <- stack_preds |>
+  threshold_perf(ACC_HCDELAY, .pred_yes,
+                 thresholds = seq(0.05, 0.95, by = 0.01),
+                 metrics = metric_set(f_meas)) |>
+  filter(.metric == "f_meas") |>
+  slice_max(.estimate, n = 1)
+
+stack_thresh <- stack_thresh_search$.threshold
+cat("Stacked Ensemble optimal threshold:", stack_thresh, "\n")
+```
+
+## 10. Final Evaluation at Optimal Thresholds
+
+```{r eval-tuned}
+#| dependson: "threshold-tuning"
+
+eval_with_threshold <- function(model, name, threshold) {
+  preds <- predict(model, test, type = "prob") |>
+    bind_cols(test |> select(ACC_HCDELAY)) |>
+    mutate(.pred_class = factor(if_else(.pred_yes > threshold, "yes", "no"),
+                                levels = c("yes", "no")))
+
+  tibble(
+    model     = name,
+    threshold = threshold,
+    auc       = roc_auc(preds, ACC_HCDELAY, .pred_yes)$.estimate,
+    recall    = recall(preds, ACC_HCDELAY, .pred_class)$.estimate,
+    precision = precision(preds, ACC_HCDELAY, .pred_class)$.estimate,
+    f1        = f_meas(preds, ACC_HCDELAY, .pred_class)$.estimate
+  )
+}
+
+stack_final <- stack_preds |>
+  mutate(.pred_class = factor(if_else(.pred_yes > stack_thresh, "yes", "no"),
+                              levels = c("yes", "no")))
+
+results_tuned <- bind_rows(
+  eval_with_threshold(best_tree, "Decision Tree", tree_thresh),
+  eval_with_threshold(best_rf,   "Random Forest", rf_thresh),
+  eval_with_threshold(best_xgb,  "XGBoost",       xgb_thresh),
+  tibble(
+    model     = "Stacked Ensemble",
+    threshold = stack_thresh,
+    auc       = roc_auc(stack_final, ACC_HCDELAY, .pred_yes)$.estimate,
+    recall    = recall(stack_final, ACC_HCDELAY, .pred_class)$.estimate,
+    precision = precision(stack_final, ACC_HCDELAY, .pred_class)$.estimate,
+    f1        = f_meas(stack_final, ACC_HCDELAY, .pred_class)$.estimate
+  )
+)
+
+cat("\nDefault threshold (0.5):\n")
+print(results)
+cat("\nOptimal threshold:\n")
+print(results_tuned)
+```
