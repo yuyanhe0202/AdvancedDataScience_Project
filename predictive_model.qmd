@@ -31,62 +31,28 @@ data <- read_csv(here("sfpuf2023_1_fall.csv"))
 
 ## 2. Data Preprocessing
 
-Select substantive variables across six domains: demographics, insurance type, chronic conditions, functional status, behavioral risk, and access to care. Replace "R" (refused) and "D" (don't know) with NA, convert all predictors to factors.
+Replace "R" (refused) and "D" (don't know) responses with NA, convert all predictors to factors, and remove administrative variables.
 
 ```{r preprocessing}
 #| cache: true
 #| dependson: "load-data"
-selected_vars <- c(
-  # Outcome
-  "ACC_HCDELAY",
-
-  # Demographics
-  "DEM_AGE", "DEM_SEX", "DEM_RACE", "DEM_EDU", "DEM_MARSTA",
-  "DEM_INCOME", "DEM_CBSA",
-
-  # Insurance type
-  "ADM_H_MEDSTA", "ADM_OP_MDCD", "ADM_MA_FLAG_YR",
-  "ADM_PARTD", "ADM_LIS_FLAG_YR",
-  "INS_D_PVESI", "INS_D_PVSELF",
-
-  # Chronic conditions
-  "HLT_OCHBP", "HLT_OCBETES", "HLT_OCCFAIL", "HLT_OCSTROKE",
-  "HLT_OCDEPRSS", "HLT_ALZDEM", "HLT_OCEMPHYS", "HLT_OCKIDNY",
-  "HLT_OCCANCER", "HLT_OCCHOLES", "HLT_OCMYOCAR",
-
-  # Functional status and health
-  "HLT_GENHELTH", "HLT_BMI_CAT", "HLT_FUNC_LIM",
-  "HLT_DISWALK", "HLT_DISBATH", "HLT_DISERRND", "HLT_DISDECSN",
-
-  # Behavioral risk
-  "RSK_SMKNOWAL", "RSK_ALCLIFE",
-
-  # Other access measures
-  "ACC_HCTROUBL", "ACC_PAYPROB",
-
-  # Interview characteristics
-  "INT_SPPROXY"
-)
-
 df <- data |>
-  select(all_of(selected_vars)) |>
+  select(-PUF_ID, -SURVEYYR, -VERSION, -PUFFWGT, -starts_with("PUFF")) |>
+  select(-DEM_RE_AGE) |>
   mutate(across(everything(), ~ if_else(. %in% c("R", "D"), NA_character_, as.character(.)))) |>
   filter(!is.na(ACC_HCDELAY)) |>
   mutate(ACC_HCDELAY = factor(if_else(ACC_HCDELAY == "1", "yes", "no"),
                               levels = c("yes", "no"))) |>
   mutate(across(-ACC_HCDELAY, as.factor))
-```
 
-```{r outcome-distribution}
-#| dependson: "preprocessing"
 cat("Outcome distribution:\n")
 print(table(df$ACC_HCDELAY))
 cat("Total sample size:", nrow(df), "\n")
 ```
 
-## 3. Train/Test Split and Cross-Validation
+## 3. Train/Test Split
 
-Use stratified 80/20 split to preserve the outcome class ratio, and 5-fold stratified CV for hyperparameter tuning.
+Use stratified 80/20 split to preserve the outcome class ratio.
 
 ```{r split}
 #| cache: true
@@ -96,35 +62,90 @@ train <- training(split)
 test  <- testing(split)
 
 cat("Training set:", nrow(train), "  Test set:", nrow(test), "\n")
-
-folds <- vfold_cv(train, v = 5, strata = ACC_HCDELAY)
 ```
 
-## 4. Recipe
+## 4. Variable Screening
+
+To avoid manual variable selection, we use a split-sample approach: a 30% screening subset is held out from the training data for a preliminary Random Forest that ranks all available predictors by impurity-based importance. The top 35 variables are then carried forward into formal modeling on the remaining 70%. This ensures the screening step does not use the same data as model training and evaluation.
+
+```{r screening}
+#| cache: true
+#| dependson: "split"
+screen_split <- initial_split(train, prop = 0.3, strata = ACC_HCDELAY)
+screen_data  <- training(screen_split)
+model_data   <- testing(screen_split)
+
+# Fit a quick RF directly with ranger to handle factors without dummy encoding
+screen_rf <- ranger::ranger(
+  ACC_HCDELAY ~ .,
+  data = screen_data,
+  num.trees = 300,
+  importance = "impurity"
+)
+
+# Extract top 25 variables by importance
+top_vars <- names(sort(screen_rf$variable.importance, decreasing = TRUE))[1:25]
+
+cat("Top 25 selected variables:\n")
+print(top_vars)
+```
+
+```{r screening-plot}
+#| dependson: "screening"
+# Visualize screening results
+tibble(
+  variable   = names(screen_rf$variable.importance),
+  importance = screen_rf$variable.importance
+) |>
+  slice_max(importance, n = 25) |>
+  mutate(variable = fct_reorder(variable, importance)) |>
+  ggplot(aes(x = importance, y = variable)) +
+  geom_col() +
+  labs(title = "Variable Screening: Top 25 Predictors",
+       x = "Impurity-based Importance", y = NULL)
+```
+
+```{r model-data}
+#| cache: true
+#| dependson: "screening"
+# Subset model_data to selected variables for formal modeling
+model_data <- model_data |>
+  select(ACC_HCDELAY, all_of(top_vars))
+
+# Create CV folds on the modeling subset
+folds <- vfold_cv(model_data, v = 5, strata = ACC_HCDELAY)
+
+cat("Modeling subset size:", nrow(model_data), "\n")
+```
+
+## 5. Recipe
 
 Preprocessing pipeline: drop high-missingness variables (>80%), remove near-zero-variance predictors, impute remaining missing values with mode, create dummy variables, and upsample the minority class to full balance.
 
 ```{r recipe}
 #| cache: true
 #| dependson: "split"
-base_recipe <- recipe(ACC_HCDELAY ~ ., data = train) |>
+base_recipe <- recipe(ACC_HCDELAY ~ ., data = model_data) |>
   step_filter_missing(all_predictors(), threshold = 0.8) |>
   step_nzv(all_predictors()) |>
   step_impute_mode(all_nominal_predictors()) |>
   step_dummy(all_nominal_predictors(), one_hot = FALSE) |>
   step_upsample(ACC_HCDELAY, over_ratio = 1)
+
 ```
 
-## 5. Model Training
+## 6. Model Training
 
 Shared tuning control: save out-of-fold predictions and workflows for stacking.
 
 ```{r control}
 #| cache: false
+
 ctrl <- control_grid(save_pred = TRUE, save_workflow = TRUE)
+
 ```
 
-### 5a. Decision Tree
+### 6a. Decision Tree
 
 ```{r tree-tune}
 #| cache: true
@@ -150,7 +171,7 @@ cat("Decision Tree complete. Best CV AUC:",
     show_best(tree_res, metric = "roc_auc", n = 1)$mean, "\n")
 ```
 
-### 5b. Random Forest
+### 6b. Random Forest
 
 ```{r rf-tune}
 #| cache: true
@@ -177,20 +198,20 @@ cat("Random Forest complete. Best CV AUC:",
     show_best(rf_res, metric = "roc_auc", n = 1)$mean, "\n")
 ```
 
-### 5c. XGBoost
+### 6c. XGBoost
 
 XGBoost uses a separate recipe without upsampling; class imbalance is handled via `scale_pos_weight` in the engine, which avoids the instability observed when combining `step_upsample` with boosted trees during refitting.
 
 ```{r xgb-tune}
 #| cache: true
 #| dependson: "split"
-xgb_recipe <- recipe(ACC_HCDELAY ~ ., data = train) |>
+xgb_recipe <- recipe(ACC_HCDELAY ~ ., data = model_data) |>
   step_filter_missing(all_predictors(), threshold = 0.8) |>
   step_nzv(all_predictors()) |>
   step_impute_mode(all_nominal_predictors()) |>
   step_dummy(all_nominal_predictors(), one_hot = FALSE)
 
-pos_weight <- sum(train$ACC_HCDELAY == "no") / sum(train$ACC_HCDELAY == "yes")
+pos_weight <- sum(model_data$ACC_HCDELAY == "no") / sum(model_data$ACC_HCDELAY == "yes")
 
 xgb_spec <- boost_tree(
   trees = tune(),
@@ -215,7 +236,7 @@ cat("XGBoost complete. Best CV AUC:",
     show_best(xgb_res, metric = "roc_auc", n = 1)$mean, "\n")
 ```
 
-## 6. Stacked Ensemble
+## 7. Stacked Ensemble
 
 Combine the three base learners using a Lasso meta-learner that optimizes AUC to determine blending weights.
 
@@ -235,7 +256,7 @@ stack_model <- stacks() |>
 autoplot(stack_model, type = "weights")
 ```
 
-## 7. Evaluation at Default Threshold (0.5)
+## 8. Evaluation at Default Threshold (0.5)
 
 ```{r eval-default}
 #| cache: true
@@ -277,33 +298,6 @@ results <- bind_rows(
 
 cat("Model comparison at default threshold (0.5):\n")
 print(results)
-```
-
-## 8. Variable Importance (Random Forest)
-
-Refit the best Random Forest with impurity-based importance to identify the most predictive beneficiary characteristics.
-
-```{r var-importance}
-#| cache: true
-#| dependson: c("rf-tune", "recipe", "split")
-rf_imp_spec <- rand_forest(
-  mtry  = select_best(rf_res, metric = "roc_auc")$mtry,
-  trees = 500,
-  min_n = select_best(rf_res, metric = "roc_auc")$min_n
-) |>
-  set_engine("ranger", importance = "impurity") |>
-  set_mode("classification")
-
-rf_imp_wf <- workflow() |>
-  add_recipe(base_recipe) |>
-  add_model(rf_imp_spec)
-
-rf_imp_fit <- fit(rf_imp_wf, data = train)
-
-rf_imp_fit |>
-  extract_fit_parsnip() |>
-  vip(num_features = 20) +
-  labs(title = "Top 20 Variable Importance (Random Forest)")
 ```
 
 ## 9. Threshold Tuning
