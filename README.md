@@ -1,6 +1,6 @@
 ## Advanced Data Science for Public Policy Final Project: A Machine Learning Study on Medicare Plan, Beneficiary Profile, and Delayed Care
 
-Yuyan He (@yuyanhe0202, email: [yh915\@georgetown.edu](mailto:yh915@georgetown.edu){.email}); Yi Dou (@Yi-Dou-513, email: [yd285\@georgetown.edu](mailto:yd285@georgetown.edu){.email})
+Yuyan He (@yuyanhe0202, email: [yh915\@georgetown.edu](mailto:yh915@georgetown.edu)); Yi Dou (@Yi-Dou-513, email: [yd285\@georgetown.edu](mailto:yd285@georgetown.edu))
 
 #### Website
 
