@@ -4,7 +4,7 @@ Yuyan He (@yuyanhe0202, email: [yh915\@georgetown.edu](mailto:yh915@georgetown.e
 
 #### Website
 
-https://yuyanhe0202.github.io/AdvancedDataScience_Project/
+<https://yuyanhe0202.github.io/AdvancedDataScience_Project/>
 
 #### Citation
 
@@ -29,12 +29,12 @@ Descriptions of contents can be found below.
 
 #### codebook
 
-The code book to the data used for this project (https://yuyanhe0202.github.io/AdvancedDataScience_Project/codebook/codebook.txt)
+The code book to the data used for this project <https://yuyanhe0202.github.io/AdvancedDataScience_Project/codebook/codebook.txt>
 
 #### final report
 
--   `final_project.qmd`: The final project contains all scripts and analytical narratives related to the project (https://yuyanhe0202.github.io/AdvancedDataScience_Project/final_project/final_project.qmd)
--   `final_project.html`: The rendered version of the above report.(https://yuyanhe0202.github.io/AdvancedDataScience_Project/final_project/final_project.html)
+-   `final_project.qmd`: The final project contains all scripts and analytical narratives related to the project <https://yuyanhe0202.github.io/AdvancedDataScience_Project/final_project/final_project.qmd>
+-   `final_project.html`: The rendered version of the above report. <https://yuyanhe0202.github.io/AdvancedDataScience_Project/final_project/final_project.html>
 
 #### presentation
-The PDF file of the final project presentation (https://yuyanhe0202.github.io/AdvancedDataScience_Project/presentation/presentation.pdf)
+The PDF file of the final project presentation <https://yuyanhe0202.github.io/AdvancedDataScience_Project/presentation/presentation.pdf>
