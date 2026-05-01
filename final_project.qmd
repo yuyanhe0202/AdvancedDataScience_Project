@@ -496,7 +496,7 @@ cat("Modeling subset size:", nrow(model_data), "\n")
 
 ## 5. Recipe
 
-Preprocessing pipeline: drop high-missingness variables (\>80%), remove near-zero-variance predictors, impute remaining missing values with mode, create dummy variables, and upsample the minority class to full balance. We did not apply survey weights in the modeling pipeline because our objective is predictive performance rather than population-level inference; survey weights are designed to produce unbiased estimates of population parameters, which is a different goal from optimizing out-of-sample prediction accuracy.
+Preprocessing pipeline: drop high-missingness variables (\>80%), remove near-zero-variance predictors, impute remaining missing values with mode, create dummy variables, and upsample the minority class to full balance. We did not apply survey weights in the modeling pipeline because we want to keep consistent with the LCA clustering workflow, and also because our objective is predictive performance rather than population-level inference, while survey weights are designed to produce unbiased estimates of population parameters, which is a different goal from optimizing out-of-sample prediction accuracy. 
 
 ```{r recipe}
 #| cache: true
