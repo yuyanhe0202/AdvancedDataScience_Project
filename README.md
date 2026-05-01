@@ -2,6 +2,10 @@
 
 Yuyan He (@yuyanhe0202, email: [yh915\@georgetown.edu](mailto:yh915@georgetown.edu){.email}); Yi Dou (@Yi-Dou-513, email: [yd285\@georgetown.edu](mailto:yd285@georgetown.edu){.email})
 
+#### Website
+
+https://yuyanhe0202.github.io/AdvancedDataScience_Project/
+
 #### Citation
 
 Bayliss, E. A., Ellis, J. L., Powers, J. D., Gozansky, W., & Zeng, C. (2019). Using Self-Reported Data to Segment Older Adult Populations with Complex Care Needs. EGEMs (Generating Evidence &Amp; Methods to Improve Patient Outcomes), 7(1), 12. <https://doi.org/10.5334/egems.275>
@@ -17,16 +21,20 @@ This repository contains the following files/folders:
 -   `codebook`
 -   `final_project.qmd`
 -   `final_project.html`
+-   `presentation`
 
-We did not push the originla data due to file size. The original data can be downloaded [here](https://data.cms.gov/medicare-current-beneficiary-survey-mcbs/medicare-current-beneficiary-survey-survey-file).
+We did not push the original data due to file size. The original data can be downloaded [here](https://data.cms.gov/medicare-current-beneficiary-survey-mcbs/medicare-current-beneficiary-survey-survey-file).
 
 Descriptions of contents can be found below.
 
 #### codebook
 
-The code book to the above data
+The code book to the data used for this project
 
 #### final report
 
 -   `final_project.qmd`: The final project contains all scripts and analytical narratives related to the project
 -   `final_project.html`: The rendered version of the above report.
+
+#### presentation
+The PDF file of the final project presentation
